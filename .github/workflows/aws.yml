@@ -1,0 +1,59 @@
+name: Deploy to Amazon ECS
+
+on:
+  push:
+    branches: [ main ]
+
+# (Opsional tapi bagus) cegah deploy bertumpuk saat push cepat-berturut
+concurrency:
+  group: ecs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Kredensial AWS (pakai Access Key). Alternatif lebih aman: OIDC (tanpa secrets).
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image
+        id: build
+        run: |
+          IMAGE_TAG=${GITHUB_SHA}
+          REPO=${{ secrets.ECR_REPOSITORY }}                   # contoh: my-icons
+          REGISTRY=${{ steps.ecr.outputs.registry }}           # contoh: 123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
+          docker build -t $REPO:$IMAGE_TAG .
+          docker tag $REPO:$IMAGE_TAG $REGISTRY/$REPO:$IMAGE_TAG
+          docker push $REGISTRY/$REPO:$IMAGE_TAG
+          echo "IMAGE=$REGISTRY/$REPO:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # Kalau task definition Anda disimpan sebagai file JSON di repo:
+      #   - taruh file-nya (mis. ecs-task.json) dan referensikan via `task-definition: ecs-task.json`
+      # Kalau pakai ARN dari secrets (task def sudah ada di AWS), biarkan seperti di bawah.
+      - name: Render task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ secrets.ECS_TASK_DEFINITION }}  # bisa ARN atau path file JSON
+          container-name: ${{ secrets.CONTAINER_NAME }}        # harus match nama container di task def
+          image: ${{ steps.build.outputs.IMAGE }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ secrets.ECS_SERVICE }}
+          cluster: ${{ secrets.ECS_CLUSTER }}
+          wait-for-service-stability: true
